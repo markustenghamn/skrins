@@ -4,20 +4,28 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
+	"github.com/0xAX/notificator"
+	"github.com/atotto/clipboard"
+	"github.com/faiface/pixel"
+	"github.com/faiface/pixel/imdraw"
+	"github.com/faiface/pixel/pixelgl"
+	"github.com/fsnotify/fsnotify"
+	"github.com/kbinani/screenshot"
+	"github.com/lithammer/shortuuid/v3"
+	"github.com/pkg/sftp"
+	"golang.org/x/crypto/ssh"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
-
-	"github.com/0xAX/notificator"
-	"github.com/atotto/clipboard"
-	"github.com/fsnotify/fsnotify"
-	"github.com/lithammer/shortuuid/v3"
-	"github.com/pkg/sftp"
-	"golang.org/x/crypto/ssh"
+	"time"
 )
 
 var notify *notificator.Notificator
@@ -49,6 +57,8 @@ func main() {
 	if err := watcher.Add(screensPath); err != nil {
 		panic(err)
 	}
+
+	pixelgl.Run(run)
 
 	<-exit
 }
@@ -132,6 +142,7 @@ func upload() {
 			url := baseURL + remoteFilename
 			copyToClipboard(url)
 			showNotification(url)
+			openbrowser(url)
 			os.Remove(fullPath)
 		}
 
@@ -238,4 +249,139 @@ func uploadObjectToDestination(src, dest string) error {
 	log.Printf("Total of %d bytes copied\n", bytes)
 
 	return nil
+}
+
+func run() {
+	monitorX, monitorY := pixelgl.PrimaryMonitor().Size()
+	cfg := pixelgl.WindowConfig{
+		Bounds:                 pixel.R(0, 0, monitorX, monitorY),
+		Undecorated:            true,
+		TransparentFramebuffer: true,
+	}
+	win, err := pixelgl.NewWindow(cfg)
+	if err != nil {
+		panic(err)
+	}
+
+	win.Clear(color.RGBA{
+		R: 0,
+		G: 0,
+		B: 0,
+		A: 10,
+	})
+
+	var u = pixel.V(0.0, 0.0)
+	var v = pixel.V(0.0, 0.0)
+	drawing := false
+	imd := imdraw.New(nil)
+	var rect pixel.Rect
+	shot := false
+	for !win.Closed() {
+		if win.Pressed(pixelgl.MouseButtonLeft) {
+			win.Clear(color.RGBA{
+				R: 0,
+				G: 0,
+				B: 0,
+				A: 20,
+			})
+
+			if !drawing {
+				u = win.MousePosition()
+				drawing = true
+			} else {
+				v = win.MousePosition()
+
+				rect = pixel.R(u.X, u.Y, v.X, v.Y)
+
+				imd.Clear()
+				imd.Color = color.RGBA{
+					R: 225,
+					G: 225,
+					B: 225,
+					A: 10,
+				}
+				imd.Push(rect.Min, rect.Max)
+				imd.Rectangle(1)
+			}
+		}
+
+		if win.JustReleased(pixelgl.MouseButtonLeft) {
+			drawing = false
+			win.SetClosed(true)
+			shot = true
+		}
+
+		if win.JustReleased(pixelgl.MouseButtonRight) {
+			win.SetClosed(true)
+		}
+
+		imd.Draw(win)
+		win.Update()
+	}
+	win.Destroy()
+	if shot {
+		maxX := int(rect.Max.X)
+		maxY := int(rect.Max.Y)
+		minX := int(rect.Min.X)
+		minY := int(rect.Min.Y)
+		maxY = int(monitorY) - maxY + 24 // 24 pixel offset?
+		minY = int(monitorY) - minY + 24 // 24 pixel offset?
+		fmt.Printf("%d %d %d %d\n", minX, minY, maxX, maxY)
+		if minX > maxX {
+			tmpMax := maxX
+			maxX = minX
+			minX = tmpMax
+		}
+		if minY > maxY {
+			tmpMax := maxY
+			maxY = minY
+			minY = tmpMax
+		}
+		generateScreenshot(image.Rectangle{
+			Min: image.Point{
+				X: minX,
+				Y: minY,
+			},
+			Max: image.Point{
+				X: maxX,
+				Y: maxY,
+			},
+		})
+	}
+}
+
+func generateScreenshot(bounds image.Rectangle) {
+	// TODO how to support multiple displays?
+	fmt.Printf("%v\n", bounds)
+	fmt.Printf("%v\n", screenshot.GetDisplayBounds(0))
+	img, err := screenshot.CaptureRect(bounds)
+	if err != nil {
+		panic(err)
+	}
+	fileName := fmt.Sprintf("%s%d_%dx%d.png", screensPath, time.Now().Unix(), bounds.Dx(), bounds.Dy())
+	file, _ := os.Create(fileName)
+	defer file.Close()
+	png.Encode(file, img)
+
+	fmt.Printf("# %v \"%s\"\n", bounds, fileName)
+}
+
+// openbrowser opens a url in the default browser
+func openbrowser(url string) {
+	var err error
+
+	switch runtime.GOOS {
+	case "linux":
+		err = exec.Command("xdg-open", url).Start()
+	case "windows":
+		err = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+	case "darwin":
+		err = exec.Command("open", url).Start()
+	default:
+		err = fmt.Errorf("unsupported platform")
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
+
 }
